@@ -1,0 +1,842 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HIC Simulator — Hydrophobic Interaction Chromatography</title>
+<style>
+  /* ============================================================
+     HIC SIMULATOR
+     A teaching widget for a senior bio/chem-E lab.
+     Self-contained: no external fonts, scripts, or network calls.
+
+     ---- TUNABLE CONSTANTS WORTH KNOWING (mirrored in the script) ----
+     MOB             : per-species mobility in each mobile phase.
+                       GFP = 0 in high salt (binds), 1 in low-salt 1xTE (elutes).
+                       Blue Dextran = ~0.9 in both phases: hydrophilic
+                       polysaccharide, not retained, flows through.
+                       Edit MOB to change the separation.
+     V2 species      : Version 2 is GFP + Blue Dextran at pH 8 — GFP is
+                       bright (above the chromophore pKa). The mixed feed
+                       sits in the vial above the bed and drains on Load.
+     ============================================================ */
+
+  :root{
+    --surface:#e8edf0;        /* cool light lab surface            */
+    --panel:#ffffff;
+    --chamber:#0b0f14;        /* dark viewing chamber (GFP glows)  */
+    --chamber-2:#10161d;
+    --ink:#1c2630;            /* primary text                      */
+    --ink-soft:#5a6b78;       /* secondary text                    */
+    --line:#d2dadf;           /* hairlines                         */
+    --accent:#0e7490;         /* petrol — UI structure only        */
+    --accent-soft:#cfe6ea;
+    --gfp:#54e08a;            /* earned colour: GFP fluorescence   */
+    --gfp-hi:#b6ffd2;
+    --bluedex:#2f6fe0;        /* earned colour: Blue Dextran       */
+    --bluedex-hi:#9cc0ff;
+    --resin:#c79a5e;          /* agarose/Sepharose bead amber      */
+    --as-tint:#d6453f;        /* ammonium sulfate — salt = red (matches GFP tool) */
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  }
+
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{
+    background:var(--surface);
+    color:var(--ink);
+    font-family:var(--sans);
+    line-height:1.5;
+    -webkit-font-smoothing:antialiased;
+    padding:clamp(12px,3vw,28px);
+  }
+  .wrap{max-width:1040px;margin:0 auto}
+
+  /* ---------- header ---------- */
+  header{
+    display:flex;align-items:flex-end;justify-content:space-between;
+    gap:16px;flex-wrap:wrap;margin-bottom:18px;
+  }
+  .title h1{
+    font-size:clamp(1.25rem,2.6vw,1.7rem);margin:0;letter-spacing:-.02em;
+    font-weight:680;
+  }
+  .title p{margin:3px 0 0;color:var(--ink-soft);font-size:.86rem}
+  .eyebrow{
+    font-family:var(--mono);font-size:.66rem;letter-spacing:.18em;
+    text-transform:uppercase;color:var(--accent);font-weight:600;
+  }
+
+  .tabs{display:flex;background:var(--panel);border:1px solid var(--line);
+    border-radius:11px;padding:4px;gap:4px}
+  .tab{
+    font-family:var(--sans);font-size:.82rem;font-weight:560;cursor:pointer;
+    border:0;background:transparent;color:var(--ink-soft);
+    padding:8px 14px;border-radius:8px;white-space:nowrap;
+    transition:background .15s,color .15s;
+  }
+  .tab[aria-selected="true"]{background:var(--ink);color:#fff}
+  .tab:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+  /* ---------- main grid ---------- */
+  .stage{display:grid;grid-template-columns:300px 1fr;gap:18px}
+  @media(max-width:760px){.stage{grid-template-columns:1fr}}
+
+  .card{background:var(--panel);border:1px solid var(--line);
+    border-radius:16px}
+
+  /* column chamber */
+  .chamber{
+    background:linear-gradient(180deg,var(--chamber),var(--chamber-2));
+    border:1px solid #05080b;border-radius:16px;padding:14px;
+    display:flex;flex-direction:column;gap:10px;
+  }
+  .phasebadge{
+    display:flex;align-items:center;gap:9px;
+    font-family:var(--mono);font-size:.74rem;color:#cdd8e0;
+    background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.09);
+    border-radius:9px;padding:7px 10px;
+  }
+  .phasedot{width:9px;height:9px;border-radius:50%;background:#46627a;
+    box-shadow:0 0 7px currentColor;flex:none}
+  #colCanvas{width:100%;height:auto;display:block;border-radius:8px}
+  .chamberfoot{font-family:var(--mono);font-size:.64rem;color:#6f8294;
+    text-align:center;letter-spacing:.04em}
+
+  /* control panel */
+  .panel{padding:18px 18px 16px;display:flex;flex-direction:column;gap:14px}
+  .steprow{display:flex;align-items:baseline;gap:8px}
+  .stepnum{font-family:var(--mono);font-size:.7rem;color:var(--accent);
+    font-weight:600;letter-spacing:.05em}
+  .stepname{font-weight:620;font-size:1rem}
+  .stepdesc{color:var(--ink-soft);font-size:.88rem;margin:-6px 0 0}
+
+  .btns{display:grid;grid-template-columns:1fr 1fr;gap:9px}
+  .btn{
+    font-family:var(--sans);font-size:.88rem;font-weight:580;cursor:pointer;
+    padding:11px 12px;border-radius:10px;border:1px solid var(--line);
+    background:#f4f7f8;color:var(--ink);text-align:left;
+    display:flex;flex-direction:column;gap:1px;
+    transition:transform .08s,box-shadow .15s,border-color .15s,background .15s;
+  }
+  .btn small{font-family:var(--mono);font-size:.62rem;color:var(--ink-soft);
+    font-weight:500;letter-spacing:.02em}
+  .btn:hover:not(:disabled){border-color:var(--accent);transform:translateY(-1px)}
+  .btn:active:not(:disabled){transform:translateY(0)}
+  .btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .btn:disabled{opacity:.42;cursor:not-allowed}
+  .btn.next{
+    border-color:var(--accent);background:#eaf6f7;
+    box-shadow:0 0 0 3px var(--accent-soft);
+  }
+  .btn.reset{grid-column:1 / -1;background:transparent;color:var(--ink-soft);
+    flex-direction:row;justify-content:center;font-weight:540}
+
+  .science{
+    background:#f6f9fa;border:1px solid var(--line);border-radius:11px;
+    padding:12px 13px;font-size:.84rem;color:var(--ink);
+  }
+  .science b{color:var(--accent)}
+  .science .flag{display:block;margin-top:8px;padding-top:8px;
+    border-top:1px dashed var(--line);color:var(--ink-soft);font-size:.78rem}
+
+  /* chromatogram */
+  .trace{padding:16px 18px;margin-top:18px}
+  .trace h2{margin:0;font-size:.78rem;font-family:var(--mono);
+    letter-spacing:.1em;text-transform:uppercase;color:var(--ink-soft);
+    font-weight:600;display:flex;align-items:center;gap:10px}
+  #chromCanvas{width:100%;height:auto;display:block;margin-top:6px}
+
+  .legend{display:flex;gap:16px;flex-wrap:wrap;margin-top:10px;
+    font-size:.78rem;color:var(--ink-soft);font-family:var(--mono)}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .swatch{width:11px;height:11px;border-radius:3px;flex:none}
+  .swatch.dash{width:16px;height:0;border-top:2px dashed #d6453f;border-radius:0}
+
+  footer{margin-top:14px;color:var(--ink-soft);font-size:.74rem;
+    font-family:var(--mono);letter-spacing:.02em}
+  @media (prefers-reduced-motion: reduce){
+    .btn{transition:none}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="title">
+      <div class="eyebrow">Downstream processing · bench simulation</div>
+      <h1>Hydrophobic Interaction Chromatography</h1>
+      <p>Bind in high salt, elute when the salting-out drive collapses.</p>
+    </div>
+    <div class="tabs" role="tablist" aria-label="Experiment version">
+      <button class="tab" id="tab1" role="tab" aria-selected="true">Version 1 · GFP</button>
+      <button class="tab" id="tab2" role="tab" aria-selected="false">Version 2 · GFP + Blue Dextran (pH 8)</button>
+    </div>
+  </header>
+
+  <div class="stage">
+    <!-- column chamber -->
+    <div class="chamber card">
+      <div class="phasebadge">
+        <span class="phasedot" id="phaseDot"></span>
+        <span id="phaseText">Mobile phase: equilibration buffer</span>
+      </div>
+      <canvas id="colCanvas" width="272" height="548"></canvas>
+      <div class="chamberfoot">mixed feed → resin bed → detector → fraction tubes</div>
+    </div>
+
+    <!-- controls -->
+    <div class="panel card">
+      <div>
+        <div class="steprow">
+          <span class="stepnum" id="stepNum">READY</span>
+          <span class="stepname" id="stepName">Column equilibrated</span>
+        </div>
+        <p class="stepdesc" id="stepDesc">Bed is packed and equilibrated in 2 M ammonium sulfate. Load the sample to begin.</p>
+      </div>
+
+      <div class="btns">
+        <button class="btn next" id="btnLoad">Load sample
+          <small id="loadSub">GFP in 2 M (NH₄)₂SO₄</small></button>
+        <button class="btn" id="btnWash" disabled>Wash
+          <small>2 M (NH₄)₂SO₄</small></button>
+        <button class="btn" id="btnElute" disabled>Elute
+          <small>switch to 1×TE</small></button>
+        <button class="btn reset" id="btnReset">↺ Reset column</button>
+      </div>
+
+      <div class="science" id="science">
+        <span id="sciBody"><b>How it works.</b> Proteins carry hydrophobic patches on their surface. A strong salting-out salt like ammonium sulfate orders the surrounding water, making it costly to keep those patches wetted — so they tuck against the resin's hydrophobic ligands. High salt = bound.</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- chromatogram -->
+  <div class="trace card">
+    <h2>Outlet detector <span id="runLabel" style="font-family:var(--mono);color:var(--ink-soft);font-weight:500;text-transform:none;letter-spacing:0">— signal vs. elution volume</span></h2>
+    <canvas id="chromCanvas" width="980" height="170"></canvas>
+    <div class="legend">
+      <span><i class="swatch" style="background:var(--gfp)"></i> GFP</span>
+      <span id="legRed" hidden><i class="swatch" style="background:var(--bluedex)"></i> Blue Dextran</span>
+      <span id="legImp"><i class="swatch" style="background:#d6453f"></i> flow-through / impurity</span>
+      <span><i class="swatch dash"></i> (NH₄)₂SO₄ (M)</span>
+    </div>
+  </div>
+
+  <footer>HIC teaching simulator · particle behaviour is illustrative, not a kinetic model</footer>
+</div>
+
+<script>
+"use strict";
+/* ============================================================
+   CONFIG — the science-relevant knobs live here.
+   ============================================================ */
+const CFG = {
+  // Mobility = fraction of the flow velocity each species travels at, in each
+  // mobile phase.  0 = fully retained (binds to the resin); 1 = moves with the void.
+  //   GFP binds in high salt and only moves once the low-salt 1xTE buffer removes the salting-out drive.
+  //   Blue Dextran is a hydrophilic polysaccharide — not retained in either phase,
+  //   so it flows straight through (slightly < 1 to nod at pore permeation at 5 kDa).
+  // Edit these to change the separation.
+  MOB: {
+    as2m: { gfp:0.0, bluedex:0.9, impurity:1.0 },   // 2 M ammonium sulfate (load + wash)
+    nacl: { gfp:1.0, bluedex:1.0, impurity:1.0 },   // elution
+  },
+  flowSpeed:    2.0,  // px/frame at full mobility
+  fillMax:      24,   // collected molecules that fill a fraction tube
+  maxRun:       1500, // frames before the run auto-stops (baseline ends)
+};
+
+// RGB used to colour the collected fractions in the outlet tubes.
+const SPECIES_RGB = { gfp:[84,224,138], bluedex:[47,111,224], impurity:[214,69,63] };
+// buffer (mobile-phase) colours used to tint each collected fraction
+const BUFFER_RGB = { as2m:[214,69,63], nacl:[185,193,205] }; // red salt vs grey 1xTE
+
+/* ---------- geometry (canvas units) ---------- */
+const FEED = { x0:84, x1:188, top:14, bottom:74 };            // mixed-sample vial
+const COL  = { x0:30, x1:242, top:104, bottom:460, outlet:488 }; // packed bed
+const NECK_X = (COL.x0+COL.x1)/2;                             // funnel centre
+// fraction collector: one test tube per operation (load / wash / elute)
+const TUBES = [
+  { x0:55,  x1:101, top:512, bottom:586, label:'load'  },
+  { x0:113, x1:159, top:512, bottom:586, label:'wash'  },
+  { x0:171, x1:217, top:512, bottom:586, label:'elute' },
+];
+const BEAD_R = 17;
+
+/* ============================================================ */
+const colCanvas = document.getElementById('colCanvas');
+const cctx = colCanvas.getContext('2d');
+const chromCanvas = document.getElementById('chromCanvas');
+const hctx = chromCanvas.getContext('2d');
+
+let DPR = Math.min(window.devicePixelRatio||1, 2);
+function fitCanvas(cv, ctx, w, h){
+  cv.width = w*DPR; cv.height = h*DPR;
+  cv.style.aspectRatio = w+' / '+h;
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+}
+fitCanvas(colCanvas, cctx, 272, 616);
+fitCanvas(chromCanvas, hctx, 980, 170);
+
+/* ---------- state ---------- */
+let mode = 1;                 // 1 or 2
+let phase = 'equil';          // 'equil' | 'as2m' | 'nacl'
+let flowing = false;
+let loaded = false;           // has the feed been released onto the bed?
+let frontY = null;            // descending buffer front (wash / elution)
+let frontKind = null;         // 'wash' | 'elute'
+// each fraction tracks species collected (n,r,g,b) and buffer/mobile-phase tint (bn,br,bg,bb)
+const blankTube = ()=>({n:0,r:0,g:0,b:0,bn:0,br:0,bg:0,bb:0});
+let tubeFill = [ blankTube(), blankTube(), blankTube() ];
+let activeTube = 0;           // which fraction tube is collecting (0=load,1=wash,2=elute)
+let t = 0;                    // run time (frames), advances while flowing
+let beads = [];
+let parts = [];
+let history = [];             // chromatogram samples
+let sig = { gfp:0, bluedex:0, impurity:0 };  // decaying detector signals
+let asMolarity = 2.0;         // ammonium sulfate in the mobile phase (plotted)
+let peakSeen = 6;             // y auto-scale for chromatogram
+
+/* ---------- bead bed generation (jittered rows) ---------- */
+function buildBeads(){
+  beads = [];
+  const stepX = BEAD_R*1.9, stepY = BEAD_R*1.7;
+  let row = 0;
+  for(let y=COL.top+BEAD_R; y<COL.bottom-BEAD_R*0.4; y+=stepY){
+    const off = (row%2)? stepX/2 : 0;
+    for(let x=COL.x0+BEAD_R+off; x<COL.x1-BEAD_R*0.4; x+=stepX){
+      beads.push({
+        x:x + (Math.random()-.5)*5,
+        y:y + (Math.random()-.5)*5,
+        r:BEAD_R*(0.86+Math.random()*0.22),
+        seed:Math.random()*6.28
+      });
+    }
+    row++;
+  }
+}
+
+/* ---------- particles: the mixed feed sits in the vial until Load ---------- */
+function populateFeed(){
+  parts = [];
+  const add=(kind,n)=>{ for(let i=0;i<n;i++) emitFeed(kind); };
+  if(mode===1){ add('gfp',26); add('impurity',16); }       // GFP + impurities
+  else        { add('gfp',22); add('bluedex',22); }        // GFP + Blue Dextran
+}
+function emitFeed(kind){
+  parts.push({
+    kind,
+    x: FEED.x0+9 + Math.random()*(FEED.x1-FEED.x0-18),
+    y: FEED.top+9 + Math.random()*(FEED.bottom-FEED.top-18),
+    r: kind==='impurity'?3.2:4.2,
+    bound:false, bead:null, ang:0, exited:false,
+    collecting:false, absorbed:false, tube:null,
+    inFeed:true,                                   // swirling in the vial
+    vx:(Math.random()-.5)*0.9, vy:(Math.random()-.5)*0.9,
+    drift:(Math.random()-.5)*0.5, wob:Math.random()*6.28,
+    // depth a retained molecule penetrates before parking on a bead
+    depth: COL.top + 24 + Math.random()*((COL.bottom-COL.top)*0.42)
+  });
+}
+
+/* ============================================================
+   ACTIONS
+   ============================================================ */
+function doLoad(){
+  if(phase==='equil'){ t=0; history=[]; }
+  phase='as2m'; asMolarity=2.0; flowing=true; loaded=true;
+  frontY=null; frontKind=null; activeTube=0;
+  for(const p of parts) p.inFeed=false;   // open the valve: feed drains onto the bed
+  setStep('01','Loading the sample',
+    'The mixed sample drains onto the beads in high-salt buffer. Greasy proteins grab the greasy beads near the top; anything that isn\u2019t greasy rides straight through.');
+  setScience(
+    '<b>Loading (high salt).</b> The salt keeps water off the proteins\u2019 greasy (\u201chydrophobic\u201d) spots, so those spots stick to the greasy coating on the beads \u2014 greasy sticks to greasy. Water-loving stuff doesn\u2019t stick and flows on through.');
+  setPhaseBadge();
+  enable(btnLoad,false); markNext(btnWash); enable(btnWash,true); enable(btnElute,true);
+}
+function doWash(){
+  phase='as2m'; asMolarity=2.0; flowing=true;
+  frontY=COL.top; frontKind='wash'; activeTube=1;  // fresh buffer; collect into tube #2
+  setStep('02','Washing',
+    'More high-salt buffer rinses through. The stuck protein stays stuck; the leftover non-greasy stuff gets carried out into the next tube.');
+  setScience(
+    '<b>Washing (still high salt).</b> Same high salt, so the greasy protein keeps holding onto the beads. The wash just carries away the stuff that never stuck \u2014 so your protein gets cleaner.');
+  setPhaseBadge();
+  markNext(btnElute);
+}
+function doElute(){
+  phase='nacl'; asMolarity=0.0; flowing=true;   // internal id 'nacl' = the low-salt 1xTE elution buffer
+  frontY=COL.top; frontKind='elute'; activeTube=2; // 1xTE front; collect into tube #3
+  setStep('03','Eluting · switch to 1×TE',
+    'Now we switch to low-salt 1×TE buffer. Where the new buffer reaches, the protein un-sticks from the beads and washes down into the last tube.');
+  setScience(
+    '<b>Eluting (switch to 1\u00d7TE buffer).</b> The low-salt buffer doesn\u2019t pull the water off the greasy spots the way the high salt did. Water comes back to cover those spots, the protein lets go of the beads, and it washes off \u2014 clean and separated.');
+  setPhaseBadge();
+  markNext(null);
+}
+function doReset(){
+  phase='equil'; flowing=false; loaded=false;
+  frontY=null; frontKind=null; activeTube=0;
+  tubeFill=[ blankTube(), blankTube(), blankTube() ];
+  t=0; history=[]; sig={gfp:0,bluedex:0,impurity:0};
+  asMolarity=2.0; peakSeen=6;
+  populateFeed();                         // refill the vial with the mixed sample
+  setStep('READY','Sample ready',
+    mode===2
+      ? 'GFP and Blue Dextran are mixed in the vial above the bed, in 2 M ammonium sulfate. Load to drain them onto the column.'
+      : 'The mixed sample sits in the vial above the bed, in 2 M ammonium sulfate. Load to drain it onto the column.');
+  setScience(
+    '<b>How it works.</b> Proteins like GFP have greasy (\u201chydrophobic\u201d) spots that water doesn\u2019t like to touch. In high salt, the salt pulls the water away from those greasy spots, so they stick to the greasy coating on the beads \u2014 greasy sticks to greasy. High salt = stuck; low salt = lets go.');
+  enable(btnLoad,true); markNext(btnLoad);
+  enable(btnWash,false); enable(btnElute,false);
+  setPhaseBadge();
+}
+
+/* ---------- UI helpers ---------- */
+const btnLoad=document.getElementById('btnLoad');
+const btnWash=document.getElementById('btnWash');
+const btnElute=document.getElementById('btnElute');
+const btnReset=document.getElementById('btnReset');
+function enable(b,on){ b.disabled=!on; if(!on) b.classList.remove('next'); }
+function markNext(b){ [btnLoad,btnWash,btnElute].forEach(x=>x.classList.remove('next')); if(b&&!b.disabled) b.classList.add('next'); }
+function setStep(n,name,desc){
+  document.getElementById('stepNum').textContent=n;
+  document.getElementById('stepName').textContent=name;
+  document.getElementById('stepDesc').textContent=desc;
+}
+function setScience(html){ document.getElementById('sciBody').innerHTML=html; }
+function setPhaseBadge(){
+  const dot=document.getElementById('phaseDot');
+  const txt=document.getElementById('phaseText');
+  if(phase==='nacl'){ dot.style.color='#9fb6c6'; dot.style.background='#9fb6c6';
+    txt.textContent='Mobile phase: 1×TE (low salt)'; }
+  else if(phase==='as2m'){ dot.style.color='var(--as-tint)'; dot.style.background='#d6453f';
+    txt.textContent='Mobile phase: 2 M (NH₄)₂SO₄'; }
+  else { dot.style.color='#d6453f'; dot.style.background='#d6453f';
+    txt.textContent='Mobile phase: 2 M (NH₄)₂SO₄ (equilibrated)'; }
+}
+
+/* ---------- version switching ---------- */
+function setMode(m){
+  mode=m;
+  document.getElementById('tab1').setAttribute('aria-selected', m===1);
+  document.getElementById('tab2').setAttribute('aria-selected', m===2);
+  document.getElementById('legRed').hidden = (m!==2);
+  document.getElementById('legImp').hidden = (m!==1);
+  document.getElementById('loadSub').textContent =
+    m===1 ? 'mixed sample, 2 M (NH₄)₂SO₄' : 'GFP + Blue Dextran, pH 8';
+  buildBeads();
+  doReset();
+}
+document.getElementById('tab1').onclick=()=>setMode(1);
+document.getElementById('tab2').onclick=()=>setMode(2);
+btnLoad.onclick=doLoad; btnWash.onclick=doWash;
+btnElute.onclick=doElute; btnReset.onclick=doReset;
+
+/* ============================================================
+   PHYSICS UPDATE
+   ============================================================ */
+function nearestBead(p){
+  let best=null, bd=1e9;
+  for(const b of beads){
+    const d=(p.x-b.x)**2+(p.y-b.y)**2;
+    if(d<bd){bd=d;best=b;}
+  }
+  return {b:best, d:Math.sqrt(bd)};
+}
+function update(){
+  // The mixed feed swirls in the vial even before Load, so it reads as a live sample.
+  for(const p of parts){
+    if(!p.inFeed) continue;
+    p.x += p.vx; p.y += p.vy;
+    if(p.x < FEED.x0+7 || p.x > FEED.x1-7) p.vx*=-1;
+    if(p.y < FEED.top+7 || p.y > FEED.bottom-7) p.vy*=-1;
+    p.x = Math.max(FEED.x0+7, Math.min(FEED.x1-7, p.x));
+    p.y = Math.max(FEED.top+7, Math.min(FEED.bottom-7, p.y));
+    if(Math.random()<0.04){
+      p.vx=Math.max(-1.1,Math.min(1.1,p.vx+(Math.random()-.5)*0.4));
+      p.vy=Math.max(-1.1,Math.min(1.1,p.vy+(Math.random()-.5)*0.4));
+    }
+  }
+
+  if(!flowing) return;
+  if(t<CFG.maxRun) t++; else flowing=false;
+
+  // mobile phase keeps draining into the active fraction, so each tube takes on
+  // the colour of the buffer flowing during its step (red high salt / grey 1xTE)
+  if(phase!=='equil'){
+    const bt=tubeFill[activeTube], bc=BUFFER_RGB[phase]||[185,193,205];
+    if(bt.bn<14 && t%6===0){ bt.bn++; bt.br+=bc[0]; bt.bg+=bc[1]; bt.bb+=bc[2]; }
+  }
+
+  // advance the buffer front down the bed
+  if(frontY!==null && frontY < COL.bottom+30) frontY += CFG.flowSpeed;
+
+  const mob = CFG.MOB[phase];
+  for(const p of parts){
+    if(p.absorbed || p.inFeed) continue;
+
+    // Falling into a fraction tube at the outlet.
+    if(p.collecting){
+      const tb=TUBES[p.tube], fill=tubeFill[p.tube];
+      const cx=(tb.x0+tb.x1)/2;
+      const innerTop=tb.top+5, innerBottom=tb.bottom-3;
+      const surf=innerBottom - Math.min(fill.n/CFG.fillMax,1)*(innerBottom-innerTop);
+      p.x += (cx-p.x)*0.18;
+      p.y += CFG.flowSpeed*1.25;
+      if(p.y >= surf){                      // hit the collected liquid
+        p.absorbed=true; p.collecting=false;
+        const c=SPECIES_RGB[p.kind]||[150,150,150];
+        fill.n++; fill.r+=c[0]; fill.g+=c[1]; fill.b+=c[2];
+      }
+      continue;
+    }
+
+    // Above the bed: drain through the neck, fanning into the wider column.
+    if(p.y < COL.top){
+      p.y += CFG.flowSpeed;
+      p.x += (p.x - NECK_X)*0.04 + (Math.random()-.5)*0.6;
+      continue;
+    }
+
+    // Parked on a bead: release only once the 1xTE (low-salt) front has swept past this depth.
+    if(p.bound){
+      if(phase==='nacl' && frontKind==='elute' && frontY!==null && p.y <= frontY){
+        p.bound=false; p.bead=null;
+      } else {
+        continue;
+      }
+    }
+
+    const m = (mob && mob[p.kind] !== undefined) ? mob[p.kind] : 1;
+
+    // Retained species not yet parked: flow to penetration depth, then bind.
+    if(m <= 0.001){
+      if(p.y < p.depth){
+        p.y += CFG.flowSpeed;
+      } else {
+        const {b}=nearestBead(p);
+        if(b){ p.bound=true; p.bead=b; p.ang=Math.atan2(p.y-b.y, p.x-b.x); }
+        else { p.y += CFG.flowSpeed; }
+      }
+      continue;
+    }
+
+    // Mobile: drift down with wobble.
+    p.wob += 0.15;
+    p.y += CFG.flowSpeed * m;
+    p.x += p.drift + Math.sin(p.wob)*0.25;
+    p.x = Math.max(COL.x0+5, Math.min(COL.x1-5, p.x));
+
+    // Cross the outlet → register detector signal and start collecting.
+    if(p.y > COL.outlet){
+      p.collecting=true;
+      p.tube = activeTube;
+      sig[p.kind] += 1.0;
+    }
+  }
+
+  // decay detector signals + sample the trace
+  sig.gfp*=0.94; sig.bluedex*=0.94; sig.impurity*=0.94;
+  peakSeen=Math.max(peakSeen, sig.gfp, sig.bluedex, sig.impurity);
+  history.push({t, gfp:sig.gfp, bluedex:sig.bluedex, imp:sig.impurity, as:asMolarity});
+  if(history.length>2000) history.shift();
+}
+
+/* ============================================================
+   RENDER — column
+   ============================================================ */
+function roundRect(ctx,x,y,w,h,r){
+  r=Math.min(r,w/2,h/2);
+  ctx.beginPath();
+  ctx.moveTo(x+r,y);
+  ctx.arcTo(x+w,y,x+w,y+h,r);
+  ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r);
+  ctx.arcTo(x,y,x+w,y,r);
+  ctx.closePath();
+}
+function drawColumn(){
+  const W=272,H=616;
+  cctx.clearRect(0,0,W,H);
+
+  // glass walls
+  cctx.save();
+  const glassGrad=cctx.createLinearGradient(COL.x0-8,0,COL.x1+8,0);
+  glassGrad.addColorStop(0,'rgba(255,255,255,.10)');
+  glassGrad.addColorStop(.5,'rgba(255,255,255,.02)');
+  glassGrad.addColorStop(1,'rgba(255,255,255,.10)');
+  roundRect(cctx,COL.x0-8,COL.top-16,(COL.x1-COL.x0)+16,(COL.bottom-COL.top)+30,12);
+  cctx.fillStyle=glassGrad; cctx.fill();
+  cctx.strokeStyle='rgba(255,255,255,.16)'; cctx.lineWidth=1; cctx.stroke();
+
+  // mobile-phase tint — split by the descending buffer front when one is active
+  cctx.save();
+  roundRect(cctx,COL.x0-6,COL.top-14,(COL.x1-COL.x0)+12,(COL.bottom-COL.top)+26,10);
+  cctx.clip();
+  const regX=COL.x0-6, regW=(COL.x1-COL.x0)+12, regTop=COL.top-14, regBot=COL.bottom+12;
+  const band=(y0,y1,c)=>{ cctx.fillStyle=c; cctx.fillRect(regX,y0,regW,y1-y0); };
+  if(frontY!==null && frontKind){
+    const fy=Math.max(regTop,Math.min(regBot,frontY));
+    if(frontKind==='elute'){
+      band(regTop, fy, 'rgba(176,186,222,0.13)');   // 1xTE (low salt) above the front
+      band(fy, regBot, 'rgba(214,69,63,0.13)');     // ammonium sulfate below — salt = red
+    } else {
+      band(regTop, fy, 'rgba(214,69,63,0.17)');     // fresh wash buffer above (high salt) = red
+      band(fy, regBot, 'rgba(214,69,63,0.10)');     // older buffer below = red
+    }
+  } else {
+    let tint='rgba(70,90,110,0.05)';
+    if(phase==='as2m'||phase==='equil') tint='rgba(214,69,63,0.13)';   // ammonium sulfate = red
+    else if(phase==='nacl') tint='rgba(200,212,222,0.06)';
+    band(regTop, regBot, tint);
+  }
+  // faint flow streaks
+  if(flowing){
+    cctx.strokeStyle='rgba(180,205,225,0.06)'; cctx.lineWidth=1;
+    const ph=(performance.now()/14)% 26;
+    for(let x=COL.x0+12;x<COL.x1;x+=22){
+      for(let y=COL.top+(ph);y<COL.bottom;y+=26){
+        cctx.beginPath(); cctx.moveTo(x,y); cctx.lineTo(x,y+8); cctx.stroke();
+      }
+    }
+  }
+  cctx.restore();
+
+  // resin beads
+  for(const b of beads){
+    const g=cctx.createRadialGradient(b.x-b.r*0.3,b.y-b.r*0.3,b.r*0.2,b.x,b.y,b.r);
+    g.addColorStop(0,'rgba(224,196,150,0.85)');
+    g.addColorStop(1,'rgba(150,114,68,0.78)');
+    cctx.beginPath(); cctx.arc(b.x,b.y,b.r,0,6.283);
+    cctx.fillStyle=g; cctx.fill();
+    cctx.lineWidth=1; cctx.strokeStyle='rgba(90,66,38,0.5)'; cctx.stroke();
+    cctx.strokeStyle='rgba(74,54,30,0.45)'; cctx.lineWidth=1.2;
+    for(let k=0;k<7;k++){
+      const a=b.seed+k*0.9;
+      cctx.beginPath();
+      cctx.moveTo(b.x+Math.cos(a)*b.r, b.y+Math.sin(a)*b.r);
+      cctx.lineTo(b.x+Math.cos(a)*(b.r+3.5), b.y+Math.sin(a)*(b.r+3.5));
+      cctx.stroke();
+    }
+  }
+  cctx.restore();
+
+  // buffer front line (drawn over the beads, under the particles)
+  drawFront();
+
+  // feed vial + funnel (the mixed sample sitting above the bed)
+  drawFeed();
+
+  // particles (collecting ones are still falling; absorbed ones are in a tube)
+  for(const p of parts){
+    if(p.absorbed) continue;
+    let x=p.x,y=p.y;
+    if(p.bound&&p.bead){ x=p.bead.x+Math.cos(p.ang)*(p.bead.r+p.r-1);
+                         y=p.bead.y+Math.sin(p.ang)*(p.bead.r+p.r-1); }
+    drawParticle(x,y,p);
+  }
+
+  // outlet / detector cell
+  cctx.fillStyle='rgba(255,255,255,.06)';
+  roundRect(cctx,COL.x0+34,COL.outlet-2,(COL.x1-COL.x0)-68,16,6); cctx.fill();
+  cctx.fillStyle='#7d92a3'; cctx.font='8px ui-monospace,monospace';
+  cctx.textAlign='center'; cctx.fillText('DETECTOR', (COL.x0+COL.x1)/2, COL.outlet+9);
+
+  // outlet fraction tubes
+  drawTubes();
+}
+
+function drawFront(){
+  if(frontY===null || frontY<COL.top-2 || frontY>COL.bottom+6) return;
+  cctx.save();
+  roundRect(cctx,COL.x0-6,COL.top-14,(COL.x1-COL.x0)+12,(COL.bottom-COL.top)+26,10);
+  cctx.clip();
+  const col = frontKind==='elute' ? '188,196,232' : '214,69,63';  // elute=grey 1xTE, wash=red salt
+  const g=cctx.createLinearGradient(0,frontY-11,0,frontY+11);
+  g.addColorStop(0,'rgba('+col+',0)');
+  g.addColorStop(.5,'rgba('+col+',0.45)');
+  g.addColorStop(1,'rgba('+col+',0)');
+  cctx.fillStyle=g; cctx.fillRect(COL.x0-6,frontY-11,(COL.x1-COL.x0)+12,22);
+  cctx.strokeStyle='rgba('+col+',0.9)'; cctx.lineWidth=1.5;
+  cctx.beginPath(); cctx.moveTo(COL.x0-4,frontY); cctx.lineTo(COL.x1+4,frontY); cctx.stroke();
+  // short tag riding the front
+  cctx.fillStyle='rgba('+col+',0.95)'; cctx.font='8px ui-monospace,monospace'; cctx.textAlign='right';
+  cctx.fillText(frontKind==='elute'?'1×TE':'wash', COL.x1-3, frontY-4);
+  cctx.restore();
+}
+
+function drawTubes(){
+  // rack ledge
+  cctx.strokeStyle='rgba(255,255,255,0.10)'; cctx.lineWidth=1;
+  cctx.beginPath(); cctx.moveTo(TUBES[0].x0-10,TUBES[0].top); cctx.lineTo(TUBES[2].x1+10,TUBES[0].top); cctx.stroke();
+
+  for(let i=0;i<TUBES.length;i++){
+    const tb=TUBES[i], fill=tubeFill[i];
+    const cx=(tb.x0+tb.x1)/2, r=(tb.x1-tb.x0)/2;
+    const isActive = (i===activeTube) && flowing && phase!=='equil';
+    const outline=()=>{ cctx.beginPath();
+      cctx.moveTo(tb.x0,tb.top); cctx.lineTo(tb.x0,tb.bottom-r);
+      cctx.arc(cx,tb.bottom-r,r,Math.PI,0,true); cctx.lineTo(tb.x1,tb.top); };
+
+    // arrow from the detector to the tube currently collecting
+    if(isActive){
+      cctx.strokeStyle='rgba(150,200,210,0.75)'; cctx.fillStyle='rgba(150,200,210,0.75)'; cctx.lineWidth=1.5;
+      const sx=(COL.x0+COL.x1)/2, sy=COL.outlet+12, ex=cx, ey=tb.top-3;
+      cctx.beginPath(); cctx.moveTo(sx,sy); cctx.lineTo(ex,ey); cctx.stroke();
+      cctx.beginPath(); cctx.moveTo(ex-3,ey-4); cctx.lineTo(ex+3,ey-4); cctx.lineTo(ex,ey+1.5); cctx.closePath(); cctx.fill();
+    }
+
+    // collected liquid: height = how much this fraction caught (species + buffer);
+    // colour = buffer tint with collected species weighted on top (so GFP greens
+    // the eluate while buffer-only fractions read as red salt / grey 1xTE)
+    const totN=fill.n+fill.bn;
+    if(totN>0){
+      const innerTop=tb.top+5, innerBottom=tb.bottom-3;
+      const frac=Math.min(totN/CFG.fillMax,1);
+      const surfY=innerBottom-frac*(innerBottom-innerTop);
+      const W=3, denom=fill.n*W+fill.bn;
+      const rr=Math.round((fill.r*W+fill.br)/denom);
+      const gg=Math.round((fill.g*W+fill.bg)/denom);
+      const bb=Math.round((fill.b*W+fill.bb)/denom);
+      cctx.save(); outline(); cctx.clip();
+      cctx.shadowColor='rgba('+rr+','+gg+','+bb+',0.55)'; cctx.shadowBlur=8;
+      cctx.fillStyle='rgba('+rr+','+gg+','+bb+',0.85)';
+      cctx.fillRect(tb.x0-1, surfY, (tb.x1-tb.x0)+2, tb.bottom-surfY);
+      cctx.shadowBlur=0; cctx.fillStyle='rgba(255,255,255,0.20)';
+      cctx.fillRect(tb.x0-1, surfY-1.5, (tb.x1-tb.x0)+2, 2);
+      cctx.restore();
+    }
+
+    // glass
+    outline();
+    cctx.strokeStyle=isActive?'rgba(150,200,210,0.85)':'rgba(255,255,255,0.20)';
+    cctx.lineWidth=isActive?1.7:1; cctx.stroke();
+
+    // number + which step filled it
+    cctx.textAlign='center';
+    cctx.fillStyle=isActive?'#bfe9ee':'#9aacb8'; cctx.font='10px ui-monospace,monospace';
+    cctx.fillText('#'+(i+1), cx, tb.bottom+16);
+    cctx.fillStyle=isActive?'#9fb6c0':'#5f7280'; cctx.font='8px ui-monospace,monospace';
+    cctx.fillText(tb.label, cx, tb.bottom+27);
+  }
+}
+function drawFeed(){
+  const hasFeed = parts.some(p=>p.inFeed);
+
+  // funnel/neck linking vial to the wider column
+  cctx.beginPath();
+  cctx.moveTo(FEED.x0, FEED.bottom-2);
+  cctx.lineTo(FEED.x1, FEED.bottom-2);
+  cctx.lineTo(COL.x1-6, COL.top);
+  cctx.lineTo(COL.x0+6, COL.top);
+  cctx.closePath();
+  cctx.fillStyle='rgba(255,255,255,0.04)'; cctx.fill();
+  cctx.strokeStyle='rgba(255,255,255,0.10)'; cctx.lineWidth=1; cctx.stroke();
+
+  // vial body, tinted while it still holds the mixed sample
+  roundRect(cctx, FEED.x0, FEED.top, FEED.x1-FEED.x0, FEED.bottom-FEED.top, 9);
+  cctx.fillStyle = hasFeed
+    ? (mode===2 ? 'rgba(78,150,175,0.18)' : 'rgba(150,168,150,0.13)')
+    : 'rgba(255,255,255,0.03)';
+  cctx.fill();
+  cctx.strokeStyle='rgba(255,255,255,0.18)'; cctx.lineWidth=1; cctx.stroke();
+
+  // label
+  cctx.fillStyle='#7d92a3'; cctx.font='8px ui-monospace,monospace'; cctx.textAlign='center';
+  cctx.fillText(hasFeed?'MIXED SAMPLE':'sample loaded', (FEED.x0+FEED.x1)/2, FEED.top-4);
+}
+function drawParticle(x,y,p){
+  cctx.save();
+  if(p.kind==='gfp'){
+    cctx.shadowColor='rgba(84,224,138,.9)'; cctx.shadowBlur=10;
+    const g=cctx.createRadialGradient(x,y,0.5,x,y,p.r+1.5);
+    g.addColorStop(0,'#d6ffe6'); g.addColorStop(.5,'#54e08a'); g.addColorStop(1,'rgba(40,150,90,0)');
+    cctx.fillStyle=g; cctx.beginPath(); cctx.arc(x,y,p.r+1.5,0,6.283); cctx.fill();
+  } else if(p.kind==='bluedex'){
+    cctx.shadowColor='rgba(47,111,224,.8)'; cctx.shadowBlur=9;
+    const g=cctx.createRadialGradient(x,y,0.5,x,y,p.r+1.5);
+    g.addColorStop(0,'#aecbff'); g.addColorStop(.5,'#2f6fe0'); g.addColorStop(1,'rgba(20,60,150,0)');
+    cctx.fillStyle=g; cctx.beginPath(); cctx.arc(x,y,p.r+1.5,0,6.283); cctx.fill();
+  } else { // impurity / flow-through (rides through with the red mobile phase)
+    cctx.fillStyle='rgba(214,69,63,.62)';
+    cctx.beginPath(); cctx.arc(x,y,p.r,0,6.283); cctx.fill();
+  }
+  cctx.restore();
+}
+
+/* ============================================================
+   RENDER — chromatogram
+   ============================================================ */
+function drawChrom(){
+  const W=980,H=170, padL=42,padR=14,padT=14,padB=24;
+  const pw=W-padL-padR, ph=H-padT-padB;
+  hctx.clearRect(0,0,W,H);
+
+  // frame + gridlines
+  hctx.strokeStyle='#e2e9ed'; hctx.lineWidth=1;
+  hctx.strokeRect(padL,padT,pw,ph);
+  hctx.fillStyle='#8a9aa6'; hctx.font='10px ui-monospace,monospace';
+  hctx.textAlign='right';
+  for(let i=0;i<=4;i++){
+    const y=padT+ph*(i/4);
+    hctx.strokeStyle='#eef3f5'; hctx.beginPath(); hctx.moveTo(padL,y); hctx.lineTo(W-padR,y); hctx.stroke();
+  }
+  // axis labels
+  hctx.save(); hctx.translate(12,padT+ph/2); hctx.rotate(-Math.PI/2);
+  hctx.textAlign='center'; hctx.fillStyle='#8a9aa6'; hctx.fillText('detector signal',0,0); hctx.restore();
+  hctx.textAlign='center'; hctx.fillText('elution volume  →', padL+pw/2, H-6);
+  const maxT=Math.max(t, 240);
+  const X=(tt)=> padL + (tt/maxT)*pw;
+  const Ys=(v)=> padT+ph - (Math.min(v,peakSeen)/peakSeen)*ph*0.92;
+  const Ya=(m)=> padT + (1-(m/2))*ph; // ammonium sulfate 0..2 over full height
+
+  if(history.length>1){
+    // ammonium sulfate (dashed) — salt = red
+    hctx.setLineDash([5,4]); hctx.strokeStyle='#d6453f'; hctx.lineWidth=1.4;
+    hctx.beginPath();
+    history.forEach((s,i)=>{ const x=X(s.t),y=Ya(s.as); i?hctx.lineTo(x,y):hctx.moveTo(x,y); });
+    hctx.stroke(); hctx.setLineDash([]);
+
+    const lines=[['imp','#d6453f'],['bluedex','#2f6fe0'],['gfp','#54e08a']];
+    for(const [key,col] of lines){
+      if(key==='bluedex' && mode!==2) continue; // Blue Dextran only in Version 2
+      if(key==='imp' && mode!==1) continue;     // impurities only in Version 1
+      hctx.strokeStyle=col; hctx.lineWidth=2; hctx.beginPath();
+      history.forEach((s,i)=>{
+        const v = key==='imp'?s.imp:(key==='gfp'?s.gfp:s.bluedex);
+        const x=X(s.t), y=Ys(v);
+        i?hctx.lineTo(x,y):hctx.moveTo(x,y);
+      });
+      hctx.stroke();
+    }
+  }
+  // salt scale ticks (right)
+  hctx.fillStyle='#aab9c4'; hctx.textAlign='left'; hctx.font='9px ui-monospace,monospace';
+  hctx.fillText('2',  W-padR+3, Ya(2)+3);
+  hctx.fillText('0',  W-padR+3, Ya(0)+3);
+}
+
+/* ---------- main loop ---------- */
+function loop(){
+  update();
+  drawColumn();
+  drawChrom();
+  requestAnimationFrame(loop);
+}
+
+/* ---------- init ---------- */
+window.addEventListener('resize',()=>{
+  DPR=Math.min(window.devicePixelRatio||1,2);
+  fitCanvas(colCanvas,cctx,272,616);
+  fitCanvas(chromCanvas,hctx,980,170);
+});
+buildBeads();
+setMode(1);
+loop();
+</script>
+</body>
+</html>
